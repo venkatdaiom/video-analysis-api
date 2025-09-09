@@ -1,8 +1,10 @@
+# requirements.txt
 fastapi
 uvicorn[standard]
 google-generativeai
 pandas
 requests
-openpyxl  # Required by pandas to read .xlsx files
+openpyxl
 python-dotenv
 tqdm
+gunicorn  # <-- ADD THIS LINE
