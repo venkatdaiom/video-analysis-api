@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+google-generativeai
+pandas
+requests
+openpyxl  # Required by pandas to read .xlsx files
+python-dotenv
+tqdm
