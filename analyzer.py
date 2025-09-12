@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 BASE_URL = os.getenv("BASE_URL")
-URL_COLUMN_NAME = 'Recorded File' # The name of the column in your CSV with the URLs
+#URL_COLUMN_NAME = 'Recorded File' # The name of the column in your CSV with the URLs
 
 ANALYSIS_PROMPT = """
 **ROLE:** You are an expert video & transcript analyst for Duroflex (furniture & mattress company).
