@@ -1,10 +1,10 @@
 # requirements.txt
 fastapi
-uvicorn[standard]
+gunicorn
 google-generativeai
-pandas
-requests
 openpyxl
+pandas
 python-dotenv
-tqdm
-gunicorn  # <-- ADD THIS LINE
+python-multipart  # <-- ADD THIS LINE
+requests
+uvicorn[standard]
