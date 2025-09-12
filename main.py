@@ -3,7 +3,8 @@ import uuid
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel, HttpUrl
 from typing import Dict, Any
-
+# main.py
+from analyzer import process_single_video_url, URL_COLUMN_NAME
 # Import your custom modules
 from analyzer import process_single_video_url
 from utils import flatten_analysis_data
