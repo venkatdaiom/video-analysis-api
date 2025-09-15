@@ -8,3 +8,4 @@ python-dotenv
 python-multipart  # <-- ADD THIS LINE
 requests
 uvicorn[standard]
+google-cloud-secret-manager # <-- ADD THIS LINE
