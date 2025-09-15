@@ -1,7 +1,7 @@
 # main.py
-# --- START OF COMBINED CODE (VERSION 3.1 with Single URL Endpoint) ---
+# Final version for GCP Cloud Run Deployment
 
-# 1. IMPORTS (All necessary packages)
+# 1. IMPORTS
 import os
 import json
 import time
@@ -15,22 +15,52 @@ import io
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel # Added for the new request model
-from dotenv import load_dotenv
+from pydantic import BaseModel
 from urllib.parse import urlparse, urljoin
 from typing import Dict, Any, Optional, Tuple
 
-# 2. CONFIGURATION (Load secrets and set constants)
-load_dotenv()
+# Import the Google Cloud client library for Secret Manager
+from google.cloud import secretmanager
+
+# 2. CONFIGURATION & LOGGING
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Load from .env file
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-BASE_URL = os.getenv("BASE_URL")
+# --- FUNCTION TO FETCH SECRET FROM GCP SECRET MANAGER ---
+def get_google_api_key():
+    """
+    Fetches the Google API Key from GCP Secret Manager.
+    This is the secure, production-ready way to handle secrets on GCP.
+    """
+    try:
+        # Create the Secret Manager client
+        client = secretmanager.SecretManagerServiceClient()
+        
+        # Get the project ID from the environment variable provided by Cloud Run
+        project_id = os.getenv("GCP_PROJECT")
+        if not project_id:
+            logger.error("GCP_PROJECT environment variable not set. Cannot fetch secret.")
+            return None
+        
+        # Build the resource name of the secret's latest version
+        name = f"projects/{project_id}/secrets/GOOGLE_API_KEY/versions/latest"
+        
+        # Access the secret version
+        response = client.access_secret_version(request={"name": name})
+        
+        # Decode the secret payload
+        return response.payload.data.decode("UTF-8")
+    except Exception as e:
+        logger.error(f"FATAL: Could not fetch GOOGLE_API_KEY from Secret Manager: {e}")
+        # Return None or raise an exception to prevent the app from running without a key
+        return None
 
-# App constants
+# --- LOAD SECRETS AND SET CONSTANTS ---
+GOOGLE_API_KEY = get_google_api_key()
+# Load non-secret config from environment variables (set in Cloud Run UI)
+BASE_URL = os.getenv("BASE_URL", "https://store.popin.to") # Default value is a fallback
 URL_COLUMN_NAME = 'Recorded File'
+
 ANALYSIS_PROMPT = """
 ROLE: You are an expert video & transcript analyst for Duroflex (furniture & mattress company).
 Your task is to analyze both the visual cues and spoken content of this sales call video to extract structured insights.
@@ -180,10 +210,8 @@ OUTPUT JSON STRUCTURE:
 "agent_video_on_start": true
 }
 }
-"""
 
-
-# 3. HELPER FUNCTIONS (Logic from utils.py and analyzer.py)
+# 3. HELPER FUNCTIONS (Analysis Logic)
 
 def flatten_analysis_data(data: dict) -> dict:
     """Flattens the nested JSON structure into a single-level dictionary."""
@@ -214,10 +242,8 @@ def flatten_analysis_data(data: dict) -> dict:
                 flattened[f"customer_{k}"] = "; ".join(map(str, v)) if isinstance(v, list) else v
     return flattened
 
-# ... [All other helper functions like sanitize_filename, download_file, analyze_video, etc. are here and unchanged] ...
-
 def sanitize_filename(filename: str) -> str:
-    """Removes characters that are illegal in Windows/Linux filenames."""
+    """Removes characters that are illegal in filenames."""
     return re.sub(r'[<>:"/\\|?*\x00-\x1F]', '', filename).strip()
 
 def get_filename_and_id_from_url(url: str) -> Tuple[str, str]:
@@ -264,9 +290,12 @@ def analyze_video(file_path: str) -> Optional[Dict[str, Any]]:
     """Uploads, analyzes, and cleans up a single video file with Gemini."""
     import google.generativeai as genai
     uploaded_file = None
+    if not GOOGLE_API_KEY:
+        logger.error("GOOGLE_API_KEY is not configured. Analysis cannot proceed.")
+        return None
     try:
-        logger.info(f"Uploading {os.path.basename(file_path)}...")
         genai.configure(api_key=GOOGLE_API_KEY)
+        logger.info(f"Uploading {os.path.basename(file_path)}...")
         uploaded_file = genai.upload_file(path=file_path)
         while uploaded_file.state.name == "PROCESSING":
             time.sleep(10)
@@ -316,7 +345,7 @@ def process_single_video_url(url: str) -> Dict[str, Any]:
             analysis_record["error"] = "Failed to download the video file."
     return analysis_record
 
-# 4. BACKGROUND WORKERS (One for batch, one for single)
+# 4. BACKGROUND WORKERS
 
 def run_batch_analysis(batch_id: str, file_contents: bytes, filename: str, tasks_db: Dict[str, Any]):
     """Background worker to process an entire uploaded file."""
@@ -340,63 +369,47 @@ def run_batch_analysis(batch_id: str, file_contents: bytes, filename: str, tasks
         tasks_db[batch_id]["status"] = "failed"
         tasks_db[batch_id]["error"] = str(e)
 
-# +++ NEW BACKGROUND WORKER FOR SINGLE URL +++
 def run_single_url_analysis(batch_id: str, url: str, tasks_db: Dict[str, Any]):
     """Background worker to process a single URL."""
     try:
-        # Update status to show this is a single job of 1
         tasks_db[batch_id].update({"status": "processing", "total_urls": 1, "processed_count": 0, "results": [], "progress": 0.0})
-        
-        # Process the single URL
         result = process_single_video_url(url)
         tasks_db[batch_id]["results"].append(flatten_analysis_data(result))
-        
-        # Mark as complete
         tasks_db[batch_id]["processed_count"] = 1
         tasks_db[batch_id]["progress"] = 100.0
         tasks_db[batch_id]["status"] = "completed"
-
     except Exception as e:
         tasks_db[batch_id]["status"] = "failed"
         tasks_db[batch_id]["error"] = str(e)
 
-# 5. FASTAPI APPLICATION (API endpoints)
+# 5. FASTAPI APPLICATION
 
-app = FastAPI(title="Video Analysis API", version="3.2.0")
-
+app = FastAPI(title="Video Analysis API", version="3.3.0-gcp")
 tasks_db: Dict[str, Dict[str, Any]] = {}
 
-# +++ NEW PYDANTIC MODEL FOR SINGLE URL REQUEST +++
 class SingleUrlRequest(BaseModel):
     video_url: str
 
-# --- ENDPOINTS ---
-
 @app.post("/analyze-batch", status_code=202)
 async def start_batch_analysis(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """Accepts a file, creates a task, and starts batch analysis in the background."""
+    """Accepts a file, creates a task, and starts batch analysis."""
     batch_id = str(uuid.uuid4())
     contents = await file.read()
     tasks_db[batch_id] = {"status": "accepted"}
     background_tasks.add_task(run_batch_analysis, batch_id, contents, file.filename, tasks_db)
-    return {"batch_id": batch_id, "message": "Batch analysis accepted and started."}
+    return {"batch_id": batch_id, "message": "Batch analysis accepted."}
 
-# +++ NEW ENDPOINT FOR SINGLE URL +++
 @app.post("/analyze-url", status_code=202)
 async def start_single_url_analysis(request: SingleUrlRequest, background_tasks: BackgroundTasks):
-    """Accepts a single URL in a JSON body and starts analysis in the background."""
+    """Accepts a single URL and starts analysis."""
     batch_id = str(uuid.uuid4())
     tasks_db[batch_id] = {"status": "accepted"}
-    # Use the new background worker
     background_tasks.add_task(run_single_url_analysis, batch_id, request.video_url, tasks_db)
-    return {"batch_id": batch_id, "message": "Single URL analysis accepted and started."}
-
-
-# --- SHARED STATUS AND RESULTS ENDPOINTS ---
+    return {"batch_id": batch_id, "message": "Single URL analysis accepted."}
 
 @app.get("/batch-status/{batch_id}")
 def get_batch_status(batch_id: str):
-    """Retrieves the current status and progress of any job (batch or single)."""
+    """Retrieves the status of any job."""
     task = tasks_db.get(batch_id)
     if not task:
         raise HTTPException(status_code=404, detail="Job ID not found")
@@ -404,7 +417,7 @@ def get_batch_status(batch_id: str):
 
 @app.get("/results/{batch_id}")
 async def get_batch_results(batch_id: str):
-    """Returns the final results of any completed job as a downloadable CSV."""
+    """Returns the results of any completed job as a CSV."""
     task = tasks_db.get(batch_id)
     if not task or task.get("status") != "completed":
         raise HTTPException(status_code=400, detail=f"Job not found or not complete. Status: {task.get('status')}")
@@ -416,5 +429,3 @@ async def get_batch_results(batch_id: str):
     response = StreamingResponse(iter([stream.getvalue()]), media_type="text/csv")
     response.headers["Content-Disposition"] = f"attachment; filename=analysis_results_{batch_id}.csv"
     return response
-
-# --- END OF COMBINED CODE ---
